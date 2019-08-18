@@ -1,5 +1,5 @@
 #include "vterm.h"
-#include "../src/vterm_internal.h" // We pull in some internal bits too
+#include "../src/vterm_internal.h" /* We pull in some internal bits too */
 
 #include <stdio.h>
 #include <string.h>
@@ -49,8 +49,9 @@ static VTermKey strp_key(char *str)
     { "KP0",   VTERM_KEY_KP_0 },
     { NULL,    VTERM_KEY_NONE },
   };
+  int i;
 
-  for(int i = 0; keys[i].name; i++) {
+  for(i = 0; keys[i].name; i++) {
     if(streq(str, keys[i].name))
       return keys[i].key;
   }
@@ -66,8 +67,9 @@ static VTermEncodingInstance encoding;
 
 static int parser_text(const char bytes[], size_t len, void *user)
 {
-  printf("text ");
   int i;
+
+  printf("text ");
   for(i = 0; i < len; i++) {
     unsigned char b = bytes[i];
     if(b < 0x20 || b == 0x7f || (b >= 0x80 && b < 0xa0))
@@ -88,6 +90,8 @@ static int parser_control(unsigned char control, void *user)
 
 static int parser_escape(const char bytes[], size_t len, void *user)
 {
+  int i;
+
   if(bytes[0] >= 0x20 && bytes[0] < 0x30) {
     if(len < 2)
       return -1;
@@ -98,7 +102,7 @@ static int parser_escape(const char bytes[], size_t len, void *user)
   }
 
   printf("escape ");
-  for(int i = 0; i < len; i++)
+  for(i = 0; i < len; i++)
     printf("%02x", bytes[i]);
   printf("\n");
 
@@ -107,15 +111,16 @@ static int parser_escape(const char bytes[], size_t len, void *user)
 
 static int parser_csi(const char *leader, const long args[], int argcount, const char *intermed, char command, void *user)
 {
+  int i;
   printf("csi %02x", command);
 
   if(leader && leader[0]) {
     printf(" L=");
-    for(int i = 0; leader[i]; i++)
+    for(i = 0; leader[i]; i++)
       printf("%02x", leader[i]);
   }
 
-  for(int i = 0; i < argcount; i++) {
+  for(i = 0; i < argcount; i++) {
     char sep = i ? ',' : ' ';
 
     if(args[i] == CSI_ARG_MISSING)
@@ -126,7 +131,7 @@ static int parser_csi(const char *leader, const long args[], int argcount, const
 
   if(intermed && intermed[0]) {
     printf(" I=");
-    for(int i = 0; intermed[i]; i++)
+    for(i = 0; intermed[i]; i++)
       printf("%02x", intermed[i]);
   }
 
@@ -137,8 +142,9 @@ static int parser_csi(const char *leader, const long args[], int argcount, const
 
 static int parser_osc(const char *command, size_t cmdlen, void *user)
 {
+  int i;
   printf("osc ");
-  for(int i = 0; i < cmdlen; i++)
+  for(i = 0; i < cmdlen; i++)
     printf("%02x", command[i]);
   printf("\n");
 
@@ -147,8 +153,9 @@ static int parser_osc(const char *command, size_t cmdlen, void *user)
 
 static int parser_dcs(const char *command, size_t cmdlen, void *user)
 {
+  int i;
   printf("dcs ");
-  for(int i = 0; i < cmdlen; i++)
+  for(i = 0; i < cmdlen; i++)
     printf("%02x", command[i]);
   printf("\n");
 
@@ -156,12 +163,13 @@ static int parser_dcs(const char *command, size_t cmdlen, void *user)
 }
 
 static VTermParserCallbacks parser_cbs = {
-  .text    = parser_text,
-  .control = parser_control,
-  .escape  = parser_escape,
-  .csi     = parser_csi,
-  .osc     = parser_osc,
-  .dcs     = parser_dcs,
+  parser_text, /* text */
+  parser_control, /* control */
+  parser_escape, /* escape */
+  parser_csi, /* csi */
+  parser_osc, /* osc */
+  parser_dcs, /* dcs */
+  NULL /* resize */
 };
 
 /* These callbacks are shared by State and Screen */
@@ -207,10 +215,11 @@ static int moverect(VTermRect dest, VTermRect src, void *user)
 static int want_settermprop = 0;
 static int settermprop(VTermProp prop, VTermValue *val, void *user)
 {
+  VTermValueType type;
   if(!want_settermprop)
     return 1;
 
-  VTermValueType type = vterm_get_prop_type(prop);
+  type = vterm_get_prop_type(prop);
   switch(type) {
   case VTERM_VALUETYPE_BOOL:
     printf("settermprop %d %s\n", prop, val->boolean ? "true" : "false");
@@ -237,11 +246,12 @@ static int settermprop(VTermProp prop, VTermValue *val, void *user)
 static int want_state_putglyph = 0;
 static int state_putglyph(VTermGlyphInfo *info, VTermPos pos, void *user)
 {
+  int i;
   if(!want_state_putglyph)
     return 1;
 
   printf("putglyph ");
-  for(int i = 0; info->chars[i]; i++)
+  for(i = 0; info->chars[i]; i++)
     printf(i ? ",%x" : "%x", info->chars[i]);
   printf(" %d %d,%d", info->width, pos.row, pos.col);
   if(info->protected_cell)
@@ -323,14 +333,17 @@ static int state_setlineinfo(int row, const VTermLineInfo *newinfo, const VTermL
 }
 
 VTermStateCallbacks state_cbs = {
-  .putglyph    = state_putglyph,
-  .movecursor  = movecursor,
-  .scrollrect  = scrollrect,
-  .moverect    = moverect,
-  .erase       = state_erase,
-  .setpenattr  = state_setpenattr,
-  .settermprop = settermprop,
-  .setlineinfo = state_setlineinfo,
+  state_putglyph, /* putglyph */
+  movecursor, /* movecursor */
+  scrollrect, /* scrollrect */
+  moverect, /* moverect */
+  state_erase, /* erase */
+  NULL, /* initpen */
+  state_setpenattr, /* setpenattr */
+  settermprop, /* settermprop */
+  NULL, /* bell */
+  NULL, /* resize */
+  state_setlineinfo, /* setlineinfo */
 };
 
 static int want_screen_damage = 0;
@@ -344,13 +357,18 @@ static int screen_damage(VTermRect rect, void *user)
       rect.start_row, rect.end_row, rect.start_col, rect.end_col);
 
   if(want_screen_damage_cells) {
-    bool equals = false;
+    int equals = FALSE;
+    int row;
+    int col;
 
-    for(int row = rect.start_row; row < rect.end_row; row++) {
+    for(row = rect.start_row; row < rect.end_row; row++) {
       int eol = rect.end_col;
       while(eol > rect.start_col) {
         VTermScreenCell cell;
-        vterm_screen_get_cell(screen, (VTermPos) { .row = row, .col = eol-1 }, &cell);
+	VTermPos pos;
+	pos.row = row;
+	pos.col = eol-1;
+        vterm_screen_get_cell(screen, pos, &cell);
         if(cell.chars[0])
           break;
 
@@ -361,12 +379,15 @@ static int screen_damage(VTermRect rect, void *user)
         break;
 
       if(!equals)
-        printf(" ="), equals = true;
+        printf(" ="), equals = TRUE;
 
       printf(" %d<", row);
-      for(int col = rect.start_col; col < eol; col++) {
+      for(col = rect.start_col; col < eol; col++) {
         VTermScreenCell cell;
-        vterm_screen_get_cell(screen, (VTermPos) { .row = row, .col = col }, &cell);
+	VTermPos pos;
+	pos.row = row;
+	pos.col = col;
+        vterm_screen_get_cell(screen, pos, &cell);
         printf(col == rect.start_col ? "%02X" : " %02X", cell.chars[0]);
       }
       printf(">");
@@ -381,15 +402,18 @@ static int screen_damage(VTermRect rect, void *user)
 static int want_screen_scrollback = 0;
 static int screen_sb_pushline(int cols, const VTermScreenCell *cells, void *user)
 {
+  int eol;
+  int c;
+
   if(!want_screen_scrollback)
     return 1;
 
-  int eol = cols;
+  eol = cols;
   while(eol && !cells[eol-1].chars[0])
     eol--;
 
   printf("sb_pushline %d =", cols);
-  for(int c = 0; c < eol; c++)
+  for(c = 0; c < eol; c++)
     printf(" %02X", cells[c].chars[0]);
   printf("\n");
 
@@ -398,11 +422,13 @@ static int screen_sb_pushline(int cols, const VTermScreenCell *cells, void *user
 
 static int screen_sb_popline(int cols, VTermScreenCell *cells, void *user)
 {
+  int col;
+
   if(!want_screen_scrollback)
     return 0;
 
-  // All lines of scrollback contain "ABCDE"
-  for(int col = 0; col < cols; col++) {
+  /* All lines of scrollback contain "ABCDE" */
+  for(col = 0; col < cols; col++) {
     if(col < 5)
       cells[col].chars[0] = 'A' + col;
     else
@@ -416,12 +442,14 @@ static int screen_sb_popline(int cols, VTermScreenCell *cells, void *user)
 }
 
 VTermScreenCallbacks screen_cbs = {
-  .damage      = screen_damage,
-  .moverect    = moverect,
-  .movecursor  = movecursor,
-  .settermprop = settermprop,
-  .sb_pushline = screen_sb_pushline,
-  .sb_popline  = screen_sb_popline,
+  screen_damage, /* damage */
+  moverect, /* moverect */
+  movecursor, /* movecursor */
+  settermprop, /* settermprop */
+  NULL, /* bell */
+  NULL, /* resize */
+  screen_sb_pushline, /* sb_pushline */
+  screen_sb_popline /* sb_popline */
 };
 
 int main(int argc, char **argv)
@@ -434,9 +462,10 @@ int main(int argc, char **argv)
   setvbuf(stdout, NULL, _IONBF, 0);
 
   while(fgets(line, sizeof line, stdin)) {
+    char *nl;
+    size_t outlen;
     err = 0;
 
-    char *nl;
     if((nl = strchr(line, '\n')))
       *nl = '\0';
 
@@ -450,6 +479,8 @@ int main(int argc, char **argv)
     }
 
     else if(strstartswith(line, "WANTSTATE") && (line[9] == '\0' || line[9] == ' ')) {
+      int i = 9;
+      int sense = 1;
       if(!state) {
         state = vterm_obtain_state(vt);
         vterm_state_set_callbacks(state, &state_cbs, NULL);
@@ -457,8 +488,6 @@ int main(int argc, char **argv)
         vterm_state_reset(state, 1);
       }
 
-      int i = 9;
-      int sense = 1;
       while(line[i] == ' ')
         i++;
       for( ; line[i]; i++)
@@ -493,13 +522,13 @@ int main(int argc, char **argv)
     }
 
     else if(strstartswith(line, "WANTSCREEN") && (line[10] == '\0' || line[10] == ' ')) {
+      int i = 10;
+      int sense = 1;
       if(!screen)
         screen = vterm_obtain_screen(vt);
       vterm_screen_enable_altscreen(screen, 1);
       vterm_screen_set_callbacks(screen, &screen_cbs, NULL);
 
-      int i = 10;
-      int sense = 1;
       while(line[i] == ' ')
         i++;
       for( ; line[i]; i++)
@@ -575,7 +604,7 @@ int main(int argc, char **argv)
       char *bytes = line + 6;
       size_t len = inplace_hex2bytes(bytes);
 
-      uint32_t cp[len];
+      uint32_t cp[1024];
       int cpi = 0;
       size_t pos = 0;
 
@@ -583,8 +612,9 @@ int main(int argc, char **argv)
           cp, &cpi, len, bytes, &pos, len);
 
       if(cpi > 0) {
+	int i;
         printf("encout ");
-        for(int i = 0; i < cpi; i++) {
+        for(i = 0; i < cpi; i++) {
           printf(i ? ",%x" : "%x", cp[i]);
         }
         printf("\n");
@@ -594,22 +624,25 @@ int main(int argc, char **argv)
     else if(strstartswith(line, "INCHAR ")) {
       char *linep = line + 7;
       unsigned int c = 0;
+      VTermModifier mod;
       while(linep[0] == ' ')
         linep++;
-      VTermModifier mod = strpe_modifiers(&linep);
+      mod = strpe_modifiers(&linep);
       sscanf(linep, " %x", &c);
 
       vterm_keyboard_unichar(vt, c, mod);
     }
 
     else if(strstartswith(line, "INKEY ")) {
+      VTermModifier mod;
+      VTermKey key;
       char *linep = line + 6;
       while(linep[0] == ' ')
         linep++;
-      VTermModifier mod = strpe_modifiers(&linep);
+      mod = strpe_modifiers(&linep);
       while(linep[0] == ' ')
         linep++;
-      VTermKey key = strp_key(linep);
+      key = strp_key(linep);
 
       vterm_keyboard_key(vt, key, mod);
     }
@@ -637,13 +670,14 @@ int main(int argc, char **argv)
     else if(strstartswith(line, "MOUSEMOVE ")) {
       char *linep = line + 10;
       int row, col, len;
+      VTermModifier mod;
       while(linep[0] == ' ')
         linep++;
       sscanf(linep, "%d,%d%n", &row, &col, &len);
       linep += len;
       while(linep[0] == ' ')
         linep++;
-      VTermModifier mod = strpe_modifiers(&linep);
+      mod = strpe_modifiers(&linep);
       vterm_mouse_move(vt, row, col, mod);
     }
 
@@ -651,13 +685,14 @@ int main(int argc, char **argv)
       char *linep = line + 9;
       char press;
       int button, len;
+      VTermModifier mod;
       while(linep[0] == ' ')
         linep++;
       sscanf(linep, "%c %d%n", &press, &button, &len);
       linep += len;
       while(linep[0] == ' ')
         linep++;
-      VTermModifier mod = strpe_modifiers(&linep);
+      mod = strpe_modifiers(&linep);
       vterm_mouse_button(vt, button, (press == 'd' || press == 'D'), mod);
     }
 
@@ -693,11 +728,11 @@ int main(int argc, char **argv)
           printf("%d,%d\n", state_pos.row, state_pos.col);
       }
       else if(strstartswith(line, "?pen ")) {
+        VTermValue val;
         char *linep = line + 5;
         while(linep[0] == ' ')
           linep++;
 
-        VTermValue val;
 #define BOOLSTR(v) ((v) ? "on" : "off")
 
         if(streq(linep, "bold")) {
@@ -774,8 +809,9 @@ int main(int argc, char **argv)
           printf("\n");
         else {
           uint32_t *chars = malloc(sizeof(uint32_t) * len);
+          size_t i;
           vterm_screen_get_chars(screen, chars, len, rect);
-          for(size_t i = 0; i < len; i++) {
+          for(i = 0; i < len; i++) {
             printf("0x%02x%s", chars[i], i < len-1 ? "," : "\n");
           }
           free(chars);
@@ -810,27 +846,31 @@ int main(int argc, char **argv)
           else if(text[len] != 0x55 || text[len+1] != 0xAA)
             printf("! screen_get_text buffer overrun right [%02x,%02x]\n", text[len], text[len+1]);
           else
-            for(size_t i = 0; i < len; i++) {
+	  {
+	    size_t i;
+            for(i = 0; i < len; i++) {
               printf("0x%02x%s", text[i], i < len-1 ? "," : "\n");
             }
+	  }
 
           free(buffer);
         }
       }
       else if(strstartswith(line, "?screen_cell ")) {
         char *linep = line + 12;
+	int i;
         VTermPos pos;
+        VTermScreenCell cell;
         while(linep[0] == ' ')
           linep++;
         if(sscanf(linep, "%d,%d\n", &pos.row, &pos.col) < 2) {
           printf("! screen_cell unrecognised input\n");
           goto abort_line;
         }
-        VTermScreenCell cell;
         if(!vterm_screen_get_cell(screen, pos, &cell))
           goto abort_line;
         printf("{");
-        for(int i = 0; i < VTERM_MAX_CHARS_PER_CELL && cell.chars[i]; i++) {
+        for(i = 0; i < VTERM_MAX_CHARS_PER_CELL && cell.chars[i]; i++) {
           printf("%s0x%x", i ? "," : "", cell.chars[i]);
         }
         printf("} width=%d attrs={", cell.width);
@@ -847,10 +887,10 @@ int main(int argc, char **argv)
         printf("bg=rgb(%d,%d,%d)\n", cell.bg.red, cell.bg.green, cell.bg.blue);
       }
       else if(strstartswith(line, "?screen_eol ")) {
+        VTermPos pos;
         char *linep = line + 12;
         while(linep[0] == ' ')
           linep++;
-        VTermPos pos;
         if(sscanf(linep, "%d,%d\n", &pos.row, &pos.col) < 2) {
           printf("! screen_eol unrecognised input\n");
           goto abort_line;
@@ -858,18 +898,17 @@ int main(int argc, char **argv)
         printf("%d\n", vterm_screen_is_eol(screen, pos));
       }
       else if(strstartswith(line, "?screen_attrs_extent ")) {
+        VTermPos pos;
+        VTermRect rect;
         char *linep = line + 21;
         while(linep[0] == ' ')
           linep++;
-        VTermPos pos;
         if(sscanf(linep, "%d,%d\n", &pos.row, &pos.col) < 2) {
           printf("! screen_attrs_extent unrecognised input\n");
           goto abort_line;
         }
-        VTermRect rect = {
-          .start_col = 0,
-          .end_col   = -1,
-        };
+	rect.start_col = 0;
+	rect.end_col   = -1;
         if(!vterm_screen_get_attrs_extent(screen, &rect, pos, ~0)) {
           printf("! screen_attrs_extent failed\n");
           goto abort_line;
@@ -886,13 +925,14 @@ int main(int argc, char **argv)
     else
       abort_line: err = 1;
 
-    size_t outlen = vterm_output_get_buffer_current(vt);
+    outlen = vterm_output_get_buffer_current(vt);
     if(outlen > 0) {
-      char outbuff[outlen];
+      int i;
+      char outbuff[1024];
       vterm_output_read(vt, outbuff, outlen);
 
       printf("output ");
-      for(int i = 0; i < outlen; i++)
+      for(i = 0; i < outlen; i++)
         printf("%x%s", (unsigned char)outbuff[i], i < outlen-1 ? "," : "\n");
     }
 

@@ -1,3 +1,6 @@
+#define DEFINE_INLINES
+
+// vim: set sw=2 :
 #include "vterm_internal.h"
 
 #include <stdio.h>
@@ -5,11 +8,13 @@
 #include <stdarg.h>
 #include <string.h>
 
+#include "utf8.h"
+
 /*****************
  * API functions *
  *****************/
 
-static void *default_malloc(size_t size, void *allocdata)
+static void *default_malloc(size_t size, void *allocdata UNUSED)
 {
   void *ptr = malloc(size);
   if(ptr)
@@ -17,14 +22,14 @@ static void *default_malloc(size_t size, void *allocdata)
   return ptr;
 }
 
-static void default_free(void *ptr, void *allocdata)
+static void default_free(void *ptr, void *allocdata UNUSED)
 {
   free(ptr);
 }
 
 static VTermAllocatorFunctions default_allocator = {
-  .malloc = &default_malloc,
-  .free   = &default_free,
+  &default_malloc, // malloc
+  &default_free // free
 };
 
 VTerm *vterm_new(int rows, int cols)
@@ -34,9 +39,11 @@ VTerm *vterm_new(int rows, int cols)
 
 VTerm *vterm_new_with_allocator(int rows, int cols, VTermAllocatorFunctions *funcs, void *allocdata)
 {
-  /* Need to bootstrap using the allocator function directly */
+  // Need to bootstrap using the allocator function directly
   VTerm *vt = (*funcs->malloc)(sizeof(VTerm), allocdata);
 
+  if (vt == NULL)
+    return NULL;
   vt->allocator = funcs;
   vt->allocdata = allocdata;
 
@@ -48,13 +55,24 @@ VTerm *vterm_new_with_allocator(int rows, int cols, VTermAllocatorFunctions *fun
   vt->parser.callbacks = NULL;
   vt->parser.cbdata    = NULL;
 
-  vt->parser.strbuffer_len = 64;
+  vt->parser.strbuffer_len = 500; // should be able to hold an OSC string
   vt->parser.strbuffer_cur = 0;
   vt->parser.strbuffer = vterm_allocator_malloc(vt, vt->parser.strbuffer_len);
+  if (vt->parser.strbuffer == NULL)
+  {
+    vterm_allocator_free(vt, vt);
+    return NULL;
+  }
 
-  vt->outbuffer_len = 64;
+  vt->outbuffer_len = 200;
   vt->outbuffer_cur = 0;
   vt->outbuffer = vterm_allocator_malloc(vt, vt->outbuffer_len);
+  if (vt->outbuffer == NULL)
+  {
+    vterm_allocator_free(vt, vt->parser.strbuffer);
+    vterm_allocator_free(vt, vt);
+    return NULL;
+  }
 
   return vt;
 }
@@ -78,9 +96,13 @@ INTERNAL void *vterm_allocator_malloc(VTerm *vt, size_t size)
   return (*vt->allocator->malloc)(size, vt->allocdata);
 }
 
+/*
+ * Free "ptr" unless it is NULL.
+ */
 INTERNAL void vterm_allocator_free(VTerm *vt, void *ptr)
 {
-  (*vt->allocator->free)(ptr, vt->allocdata);
+  if (ptr)
+    (*vt->allocator->free)(ptr, vt->allocdata);
 }
 
 void vterm_get_size(const VTerm *vt, int *rowsp, int *colsp)
@@ -126,23 +148,55 @@ static int outbuffer_is_full(VTerm *vt)
   return vt->outbuffer_cur >= vt->outbuffer_len - 1;
 }
 
+#if (defined(_XOPEN_SOURCE) && _XOPEN_SOURCE >= 500) \
+	|| defined(_ISOC99_SOURCE) || defined(_BSD_SOURCE)
+# undef VSNPRINTF
+# define VSNPRINTF vsnprintf
+#else
+# ifdef VSNPRINTF
+// Use a provided vsnprintf() function.
+int VSNPRINTF(char *str, size_t str_m, const char *fmt, va_list ap);
+# endif
+#endif
+
+
 INTERNAL void vterm_push_output_vsprintf(VTerm *vt, const char *format, va_list args)
 {
+  int written;
+#ifndef VSNPRINTF
+  // When vsnprintf() is not available (C90) fall back to vsprintf().
+  char buffer[1024]; // 1Kbyte is enough for everybody, right?
+#endif
+
   if(outbuffer_is_full(vt)) {
     DEBUG_LOG("vterm_push_output(): buffer overflow; truncating output\n");
     return;
   }
 
-  int written = vsnprintf(vt->outbuffer + vt->outbuffer_cur,
+#ifdef VSNPRINTF
+  written = VSNPRINTF(vt->outbuffer + vt->outbuffer_cur,
       vt->outbuffer_len - vt->outbuffer_cur,
       format, args);
 
-  if(written == vt->outbuffer_len - vt->outbuffer_cur) {
-    /* output was truncated */
+  if(written == (int)(vt->outbuffer_len - vt->outbuffer_cur)) {
+    // output was truncated
     vt->outbuffer_cur = vt->outbuffer_len - 1;
   }
   else
     vt->outbuffer_cur += written;
+#else
+  written = vsprintf(buffer, format, args);
+
+  if(written >= (int)(vt->outbuffer_len - vt->outbuffer_cur - 1)) {
+    // output was truncated
+    written = vt->outbuffer_len - vt->outbuffer_cur - 1;
+  }
+  if (written > 0)
+  {
+    strncpy(vt->outbuffer + vt->outbuffer_cur, buffer, written + 1);
+    vt->outbuffer_cur += written;
+  }
+#endif
 }
 
 INTERNAL void vterm_push_output_sprintf(VTerm *vt, const char *format, ...)
@@ -156,13 +210,13 @@ INTERNAL void vterm_push_output_sprintf(VTerm *vt, const char *format, ...)
 INTERNAL void vterm_push_output_sprintf_ctrl(VTerm *vt, unsigned char ctrl, const char *fmt, ...)
 {
   size_t orig_cur = vt->outbuffer_cur;
+  va_list args;
 
   if(ctrl >= 0x80 && !vt->mode.ctrl8bit)
     vterm_push_output_sprintf(vt, ESC_S "%c", ctrl - 0x40);
   else
     vterm_push_output_sprintf(vt, "%c", ctrl);
 
-  va_list args;
   va_start(args, fmt);
   vterm_push_output_vsprintf(vt, fmt, args);
   va_end(args);
@@ -174,13 +228,13 @@ INTERNAL void vterm_push_output_sprintf_ctrl(VTerm *vt, unsigned char ctrl, cons
 INTERNAL void vterm_push_output_sprintf_dcs(VTerm *vt, const char *fmt, ...)
 {
   size_t orig_cur = vt->outbuffer_cur;
+  va_list args;
 
   if(!vt->mode.ctrl8bit)
     vterm_push_output_sprintf(vt, ESC_S "%c", C1_DCS - 0x40);
   else
     vterm_push_output_sprintf(vt, "%c", C1_DCS);
 
-  va_list args;
   va_start(args, fmt);
   vterm_push_output_vsprintf(vt, fmt, args);
   va_end(args);
@@ -236,7 +290,7 @@ VTermValueType vterm_get_attr_type(VTermAttr attr)
 
     case VTERM_N_ATTRS: return 0;
   }
-  return 0; /* UNREACHABLE */
+  return 0; // UNREACHABLE
 }
 
 VTermValueType vterm_get_prop_type(VTermProp prop)
@@ -250,10 +304,11 @@ VTermValueType vterm_get_prop_type(VTermProp prop)
     case VTERM_PROP_REVERSE:       return VTERM_VALUETYPE_BOOL;
     case VTERM_PROP_CURSORSHAPE:   return VTERM_VALUETYPE_INT;
     case VTERM_PROP_MOUSE:         return VTERM_VALUETYPE_INT;
+    case VTERM_PROP_CURSORCOLOR:   return VTERM_VALUETYPE_STRING;
 
     case VTERM_N_PROPS: return 0;
   }
-  return 0; /* UNREACHABLE */
+  return 0; // UNREACHABLE
 }
 
 void vterm_scroll_rect(VTermRect rect,
@@ -268,26 +323,24 @@ void vterm_scroll_rect(VTermRect rect,
 
   if(abs(downward)  >= rect.end_row - rect.start_row ||
      abs(rightward) >= rect.end_col - rect.start_col) {
-    /* Scroll more than area; just erase the lot */
+    // Scroll more than area; just erase the lot
     (*eraserect)(rect, 0, user);
     return;
   }
 
   if(rightward >= 0) {
-    /* rect: [XXX................]
-     * src:     [----------------]
-     * dest: [----------------]
-     */
+    // rect: [XXX................]
+    // src:     [----------------]
+    // dest: [----------------]
     dest.start_col = rect.start_col;
     dest.end_col   = rect.end_col   - rightward;
     src.start_col  = rect.start_col + rightward;
     src.end_col    = rect.end_col;
   }
   else {
-    /* rect: [................XXX]
-     * src:  [----------------]
-     * dest:    [----------------]
-     */
+    // rect: [................XXX]
+    // src:  [----------------]
+    // dest:    [----------------]
     int leftward = -rightward;
     dest.start_col = rect.start_col + leftward;
     dest.end_col   = rect.end_col;
@@ -336,12 +389,15 @@ void vterm_copy_cells(VTermRect dest,
   int init_row, test_row, init_col, test_col;
   int inc_row, inc_col;
 
+  VTermPos pos;
+
   if(downward < 0) {
     init_row = dest.end_row - 1;
     test_row = dest.start_row - 1;
     inc_row = -1;
   }
-  else /* downward >= 0 */ {
+  else {
+    // downward >= 0
     init_row = dest.start_row;
     test_row = dest.end_row;
     inc_row = +1;
@@ -352,16 +408,18 @@ void vterm_copy_cells(VTermRect dest,
     test_col = dest.start_col - 1;
     inc_col = -1;
   }
-  else /* rightward >= 0 */ {
+  else {
+    // rightward >= 0
     init_col = dest.start_col;
     test_col = dest.end_col;
     inc_col = +1;
   }
 
-  VTermPos pos;
   for(pos.row = init_row; pos.row != test_row; pos.row += inc_row)
     for(pos.col = init_col; pos.col != test_col; pos.col += inc_col) {
-      VTermPos srcpos = { pos.row + downward, pos.col + rightward };
+      VTermPos srcpos;
+      srcpos.row = pos.row + downward;
+      srcpos.col = pos.col + rightward;
       (*copycell)(pos, srcpos, user);
     }
 }

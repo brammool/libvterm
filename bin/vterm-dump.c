@@ -21,7 +21,7 @@ static int parser_text(const char bytes[], size_t len, void *user)
   unsigned char *b = (unsigned char *)bytes;
 
   int i;
-  for(i = 0; i < len; /* none */) {
+  for(i = 0; i < len; ) {
     if(b[i] < 0x20)        // C0
       break;
     else if(b[i] < 0x80)   // ASCII
@@ -51,7 +51,7 @@ static int parser_text(const char bytes[], size_t len, void *user)
   return i;
 }
 
-/* 0     1      2      3       4     5      6      7      8      9      A      B      C      D      E      F    */
+// 0     1      2      3       4     5      6      7      8      9      A      B      C      D      E      F
 static const char *name_c0[] = {
   "NUL", "SOH", "STX", "ETX", "EOT", "ENQ", "ACK", "BEL", "BS",  "HT",  "LF",  "VT",  "FF",  "CR",  "LS0", "LS1",
   "DLE", "DC1", "DC2", "DC3", "DC4", "NAK", "SYN", "ETB", "CAN", "EM",  "SUB", "ESC", "FS",  "GS",  "RS",  "US",
@@ -91,14 +91,14 @@ static int parser_escape(const char bytes[], size_t len, void *user)
   return len;
 }
 
-/* 0     1      2      3       4     5      6      7      8      9      A      B      C      D      E      F    */
+// 0     1      2      3       4     5      6      7      8      9      A      B      C      D      E      F
 static const char *name_csi_plain[] = {
   "ICH", "CUU", "CUD", "CUF", "CUB", "CNL", "CPL", "CHA", "CUP", "CHT", "ED",  "EL",  "IL",  "DL",  "EF",  "EA",
   "DCH", "SSE", "CPR", "SU",  "SD",  "NP",  "PP",  "CTC", "ECH", "CVT", "CBT", "SRS", "PTX", "SDS", "SIMD",NULL,
   "HPA", "HPR", "REP", "DA",  "VPA", "VPR", "HVP", "TBC", "SM",  "MC",  "HPB", "VPB", "RM",  "SGR", "DSR", "DAQ",
 };
 
-/*0           4           8           B         */
+//0           4           8           B
 static const int newline_csi_plain[] = {
   0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0,
   0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
@@ -111,7 +111,7 @@ static int parser_csi(const char *leader, const long args[], int argcount, const
   if(!leader && !intermed && command < 0x70)
     name = name_csi_plain[command - 0x40];
   else if(leader && streq(leader, "?") && !intermed) {
-    /* DEC */
+    // DEC
     switch(command) {
       case 'h': name = "DECSM"; break;
       case 'l': name = "DECRM"; break;
@@ -131,8 +131,11 @@ static int parser_csi(const char *leader, const long args[], int argcount, const
   if(leader && leader[0])
     printf(" %s", leader);
 
-  for(int i = 0; i < argcount; i++) {
-    printf(i ? "," : " ");
+  {
+    int i;
+    for(i = 0; i < argcount; i++) {
+      printf(i ? "," : " ");
+  }
 
     if(args[i] == CSI_ARG_MISSING)
       printf("*");
@@ -169,17 +172,23 @@ static int parser_dcs(const char *command, size_t cmdlen, void *user)
 }
 
 static VTermParserCallbacks parser_cbs = {
-  .text    = &parser_text,
-  .control = &parser_control,
-  .escape  = &parser_escape,
-  .csi     = &parser_csi,
-  .osc     = &parser_osc,
-  .dcs     = &parser_dcs,
+  &parser_text, // text
+  &parser_control, // control
+  &parser_escape, // escape
+  &parser_csi, // csi
+  &parser_osc, // osc
+  &parser_dcs, // dcs
+  NULL // resize
 };
 
 int main(int argc, char *argv[])
 {
   int use_colour = isatty(1);
+  const char *file;
+  int fd;
+  VTerm *vt;
+  int len;
+  char buffer[1024];
 
   int opt;
   while((opt = getopt(argc, argv, "c")) != -1) {
@@ -188,9 +197,8 @@ int main(int argc, char *argv[])
     }
   }
 
-  const char *file = argv[optind++];
+  file = argv[optind++];
 
-  int fd;
   if(!file || streq(file, "-"))
     fd = 0; // stdin
   else {
@@ -206,13 +214,11 @@ int main(int argc, char *argv[])
     special_end   = "}\x1b[m";
   }
 
-  /* Size matters not for the parser */
-  VTerm *vt = vterm_new(25, 80);
+  // Size matters not for the parser
+  vt = vterm_new(25, 80);
   vterm_set_utf8(vt, 1);
   vterm_parser_set_callbacks(vt, &parser_cbs, NULL);
 
-  int len;
-  char buffer[1024];
   while((len = read(fd, buffer, sizeof(buffer))) > 0) {
     vterm_input_write(vt, buffer, len);
   }

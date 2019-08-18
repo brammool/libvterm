@@ -8,20 +8,41 @@ my ( $encname ) = $ARGV[0] =~ m{/([^/.]+).tbl}
 
 print <<"EOF";
 static const struct StaticTableEncoding encoding_$encname = {
-  { .decode = &decode_table },
+  {
+    NULL, /* init */
+    &decode_table /* decode */
+  },
   {
 EOF
 
+my $row = 0;
 while( <> ) {
    s/\s*#.*//; # strip comment
 
-   s{^(\d+)/(\d+)}{sprintf "[0x%02x]", $1*16 + $2}e; # Convert 3/1 to [0x31]
-   s{"(.)"}{sprintf "0x%04x", ord $1}e;              # Convert "A" to 0x41
-   s{U\+}{0x};                                       # Convert U+0041 to 0x0041
+   if ($_ =~ m{^\d+/\d+}) {
+     my ($up, $low) = ($_ =~ m{^(\d+)/(\d+)});
+     my $thisrow = $up * 16 + $low;
+     while ($row < $thisrow) {
+	print "    0x0, /* $row */\n";
+	++$row;
+     }
+   }
 
-   s{$}{,}; # append comma
+   s{^(\d+)/(\d+)}{""}e;                     # Remove 3/1
+   s{ = }{""}e;                            # Remove " = "
+   s{"(.)"}{sprintf "0x%04x", ord $1}e;      # Convert "A" to 0x41
+   s{U\+}{0x};                               # Convert U+0041 to 0x0041
+
+   s{$}{, /* $row */}; # append comma and index
 
    print "    $_";
+
+   ++$row;
+}
+
+while ($row < 128) {
+   print "    0x0, /* $row */\n";
+   ++$row;
 }
 
 print <<"EOF";

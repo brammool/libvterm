@@ -9,23 +9,24 @@
 # define DEBUG_GLYPH_COMBINE
 #endif
 
-/* Some convenient wrappers to make callback functions easier */
+static int on_resize(int rows, int cols, void *user);
+
+// Some convenient wrappers to make callback functions easier
 
 static void putglyph(VTermState *state, const uint32_t chars[], int width, VTermPos pos)
 {
-  VTermGlyphInfo info = {
-    .chars = chars,
-    .width = width,
-    .protected_cell = state->protected_cell,
-    .dwl = state->lineinfo[pos.row].doublewidth,
-    .dhl = state->lineinfo[pos.row].doubleheight,
-  };
+  VTermGlyphInfo info;
+  info.chars = chars;
+  info.width = width;
+  info.protected_cell = state->protected_cell;
+  info.dwl = state->lineinfo[pos.row].doublewidth;
+  info.dhl = state->lineinfo[pos.row].doubleheight;
 
   if(state->callbacks && state->callbacks->putglyph)
     if((*state->callbacks->putglyph)(&info, pos, state->cbdata))
       return;
 
-  DEBUG_LOG("libvterm: Unhandled putglyph U+%04x at (%d,%d)\n", chars[0], pos.col, pos.row);
+  DEBUG_LOG3("libvterm: Unhandled putglyph U+%04x at (%d,%d)\n", chars[0], pos.col, pos.row);
 }
 
 static void updatecursor(VTermState *state, VTermPos *oldpos, int cancel_phantom)
@@ -52,6 +53,8 @@ static VTermState *vterm_state_new(VTerm *vt)
 {
   VTermState *state = vterm_allocator_malloc(vt, sizeof(VTermState));
 
+  if (state == NULL)
+    return NULL;
   state->vt = vt;
 
   state->rows = vt->rows;
@@ -83,22 +86,24 @@ INTERNAL void vterm_state_free(VTermState *state)
 
 static void scroll(VTermState *state, VTermRect rect, int downward, int rightward)
 {
+  int rows;
+  int cols;
   if(!downward && !rightward)
     return;
 
-  int rows = rect.end_row - rect.start_row;
+  rows = rect.end_row - rect.start_row;
   if(downward > rows)
     downward = rows;
   else if(downward < -rows)
     downward = -rows;
 
-  int cols = rect.end_col - rect.start_col;
+  cols = rect.end_col - rect.start_col;
   if(rightward > cols)
     rightward = cols;
   else if(rightward < -cols)
     rightward = -cols;
 
-  /* Update lineinfo if full line */
+  // Update lineinfo if full line
   if(rect.start_col == 0 && rect.end_col == state->cols && rightward == 0) {
     int height = rect.end_row - rect.start_row - abs(downward);
 
@@ -124,12 +129,11 @@ static void scroll(VTermState *state, VTermRect rect, int downward, int rightwar
 static void linefeed(VTermState *state)
 {
   if(state->pos.row == SCROLLREGION_BOTTOM(state) - 1) {
-    VTermRect rect = {
-      .start_row = state->scrollregion_top,
-      .end_row   = SCROLLREGION_BOTTOM(state),
-      .start_col = SCROLLREGION_LEFT(state),
-      .end_col   = SCROLLREGION_RIGHT(state),
-    };
+    VTermRect rect;
+    rect.start_row = state->scrollregion_top;
+    rect.end_row   = SCROLLREGION_BOTTOM(state);
+    rect.start_col = SCROLLREGION_LEFT(state);
+    rect.end_col   = SCROLLREGION_RIGHT(state);
 
     scroll(state, rect, 1, 0);
   }
@@ -219,7 +223,7 @@ static void set_lineinfo(VTermState *state, int row, int force, int dwl, int dhl
     info.doublewidth = DWL_OFF;
   else if(dwl == DWL_ON)
     info.doublewidth = DWL_ON;
-  /* else -1 to ignore */
+  // else -1 to ignore
 
   if(dhl == DHL_OFF)
     info.doubleheight = DHL_OFF;
@@ -238,39 +242,45 @@ static void set_lineinfo(VTermState *state, int row, int force, int dwl, int dhl
 static int on_text(const char bytes[], size_t len, void *user)
 {
   VTermState *state = user;
+  uint32_t *codepoints;
+  int npoints = 0;
+  size_t eaten = 0;
+  VTermEncodingInstance *encoding;
+  int i = 0;
 
   VTermPos oldpos = state->pos;
 
-  /* We'll have at most len codepoints */
-  uint32_t codepoints[len];
-  int npoints = 0;
-  size_t eaten = 0;
+  // We'll have at most len codepoints, plus one from a previous incomplete
+  // sequence.
+  codepoints = vterm_allocator_malloc(state->vt, (len + 1) * sizeof(uint32_t));
+  if (codepoints == NULL)
+    return 0;
 
-  VTermEncodingInstance *encoding =
+  encoding =
     state->gsingle_set     ? &state->encoding[state->gsingle_set] :
     !(bytes[eaten] & 0x80) ? &state->encoding[state->gl_set] :
     state->vt->mode.utf8   ? &state->encoding_utf8 :
                              &state->encoding[state->gr_set];
 
   (*encoding->enc->decode)(encoding->enc, encoding->data,
-      codepoints, &npoints, state->gsingle_set ? 1 : len,
+      codepoints, &npoints, state->gsingle_set ? 1 : (int)len,
       bytes, &eaten, len);
 
-  /* There's a chance an encoding (e.g. UTF-8) hasn't found enough bytes yet
-   * for even a single codepoint
-   */
+  // There's a chance an encoding (e.g. UTF-8) hasn't found enough bytes yet
+  // for even a single codepoint
   if(!npoints)
-    return eaten;
+  {
+    vterm_allocator_free(state->vt, codepoints);
+    return (int)eaten;
+  }
 
   if(state->gsingle_set && npoints)
     state->gsingle_set = 0;
 
-  int i = 0;
-
-  /* This is a combining char. that needs to be merged with the previous
-   * glyph output */
+  // This is a combining char. that needs to be merged with the previous
+  // glyph output
   if(vterm_unicode_is_combining(codepoints[i])) {
-    /* See if the cursor has moved since */
+    // See if the cursor has moved since
     if(state->pos.row == state->combine_pos.row && state->pos.col == state->combine_pos.col + state->combine_width) {
 #ifdef DEBUG_GLYPH_COMBINE
       int printpos;
@@ -280,18 +290,18 @@ static int on_text(const char bytes[], size_t len, void *user)
       printf("} + {");
 #endif
 
-      /* Find where we need to append these combining chars */
+      // Find where we need to append these combining chars
       int saved_i = 0;
       while(state->combine_chars[saved_i])
         saved_i++;
 
-      /* Add extra ones */
+      // Add extra ones
       while(i < npoints && vterm_unicode_is_combining(codepoints[i])) {
-        if(saved_i >= state->combine_chars_size)
+        if(saved_i >= (int)state->combine_chars_size)
           grow_combine_buffer(state);
         state->combine_chars[saved_i++] = codepoints[i++];
       }
-      if(saved_i >= state->combine_chars_size)
+      if(saved_i >= (int)state->combine_chars_size)
         grow_combine_buffer(state);
       state->combine_chars[saved_i] = 0;
 
@@ -301,7 +311,7 @@ static int on_text(const char bytes[], size_t len, void *user)
       printf("}\n");
 #endif
 
-      /* Now render it */
+      // Now render it
       putglyph(state, state->combine_chars, state->combine_width, state->combine_pos);
     }
     else {
@@ -310,20 +320,24 @@ static int on_text(const char bytes[], size_t len, void *user)
   }
 
   for(; i < npoints; i++) {
-    /* Try to find combining characters following this */
+    // Try to find combining characters following this
     int glyph_starts = i;
     int glyph_ends;
+    int width = 0;
+    uint32_t *chars;
+
     for(glyph_ends = i + 1; glyph_ends < npoints; glyph_ends++)
       if(!vterm_unicode_is_combining(codepoints[glyph_ends]))
         break;
 
-    int width = 0;
-
-    uint32_t chars[glyph_ends - glyph_starts + 1];
+    chars = vterm_allocator_malloc(state->vt, (glyph_ends - glyph_starts + 1) * sizeof(uint32_t));
+    if (chars == NULL)
+      break;
 
     for( ; i < glyph_ends; i++) {
+      int this_width;
       chars[i - glyph_starts] = codepoints[i];
-      int this_width = vterm_unicode_width(codepoints[i]);
+      this_width = vterm_unicode_width(codepoints[i]);
 #ifdef DEBUG
       if(this_width < 0) {
         fprintf(stderr, "Text with negative-width codepoint U+%04x\n", codepoints[i]);
@@ -351,31 +365,29 @@ static int on_text(const char bytes[], size_t len, void *user)
     }
 
     if(state->mode.insert) {
-      /* TODO: This will be a little inefficient for large bodies of text, as
-       * it'll have to 'ICH' effectively before every glyph. We should scan
-       * ahead and ICH as many times as required
-       */
-      VTermRect rect = {
-        .start_row = state->pos.row,
-        .end_row   = state->pos.row + 1,
-        .start_col = state->pos.col,
-        .end_col   = THISROWWIDTH(state),
-      };
+      // TODO: This will be a little inefficient for large bodies of text, as
+      // it'll have to 'ICH' effectively before every glyph. We should scan
+      // ahead and ICH as many times as required
+      VTermRect rect;
+      rect.start_row = state->pos.row;
+      rect.end_row   = state->pos.row + 1;
+      rect.start_col = state->pos.col;
+      rect.end_col   = THISROWWIDTH(state);
       scroll(state, rect, 0, -1);
     }
 
     putglyph(state, chars, width, state->pos);
 
     if(i == npoints - 1) {
-      /* End of the buffer. Save the chars in case we have to combine with
-       * more on the next call */
+      // End of the buffer. Save the chars in case we have to combine with
+      // more on the next call
       int save_i;
       for(save_i = 0; chars[save_i]; save_i++) {
-        if(save_i >= state->combine_chars_size)
+        if(save_i >= (int)state->combine_chars_size)
           grow_combine_buffer(state);
         state->combine_chars[save_i] = chars[save_i];
       }
-      if(save_i >= state->combine_chars_size)
+      if(save_i >= (int)state->combine_chars_size)
         grow_combine_buffer(state);
       state->combine_chars[save_i] = 0;
       state->combine_width = width;
@@ -389,6 +401,7 @@ static int on_text(const char bytes[], size_t len, void *user)
     else {
       state->pos.col += width;
     }
+    vterm_allocator_free(state->vt, chars);
   }
 
   updatecursor(state, &oldpos, 0);
@@ -402,7 +415,8 @@ static int on_text(const char bytes[], size_t len, void *user)
   }
 #endif
 
-  return eaten;
+  vterm_allocator_free(state->vt, codepoints);
+  return (int)eaten;
 }
 
 static int on_control(unsigned char control, void *user)
@@ -412,61 +426,60 @@ static int on_control(unsigned char control, void *user)
   VTermPos oldpos = state->pos;
 
   switch(control) {
-  case 0x07: /* BEL - ECMA-48 8.3.3 */
+  case 0x07: // BEL - ECMA-48 8.3.3
     if(state->callbacks && state->callbacks->bell)
       (*state->callbacks->bell)(state->cbdata);
     break;
 
-  case 0x08: /* BS - ECMA-48 8.3.5 */
+  case 0x08: // BS - ECMA-48 8.3.5
     if(state->pos.col > 0)
       state->pos.col--;
     break;
 
-  case 0x09: /* HT - ECMA-48 8.3.60 */
+  case 0x09: // HT - ECMA-48 8.3.60
     tab(state, 1, +1);
     break;
 
-  case 0x0a: /* LF - ECMA-48 8.3.74 */
-  case 0x0b: /* VT */
-  case 0x0c: /* FF */
+  case 0x0a: // LF - ECMA-48 8.3.74
+  case 0x0b: // VT
+  case 0x0c: // FF
     linefeed(state);
     if(state->mode.newline)
       state->pos.col = 0;
     break;
 
-  case 0x0d: /* CR - ECMA-48 8.3.15 */
+  case 0x0d: // CR - ECMA-48 8.3.15
     state->pos.col = 0;
     break;
 
-  case 0x0e: /* LS1 - ECMA-48 8.3.76 */
+  case 0x0e: // LS1 - ECMA-48 8.3.76
     state->gl_set = 1;
     break;
 
-  case 0x0f: /* LS0 - ECMA-48 8.3.75 */
+  case 0x0f: // LS0 - ECMA-48 8.3.75
     state->gl_set = 0;
     break;
 
-  case 0x84: /* IND - DEPRECATED but implemented for completeness */
+  case 0x84: // IND - DEPRECATED but implemented for completeness
     linefeed(state);
     break;
 
-  case 0x85: /* NEL - ECMA-48 8.3.86 */
+  case 0x85: // NEL - ECMA-48 8.3.86
     linefeed(state);
     state->pos.col = 0;
     break;
 
-  case 0x88: /* HTS - ECMA-48 8.3.62 */
+  case 0x88: // HTS - ECMA-48 8.3.62
     set_col_tabstop(state, state->pos.col);
     break;
 
-  case 0x8d: /* RI - ECMA-48 8.3.104 */
+  case 0x8d: // RI - ECMA-48 8.3.104
     if(state->pos.row == state->scrollregion_top) {
-      VTermRect rect = {
-        .start_row = state->scrollregion_top,
-        .end_row   = SCROLLREGION_BOTTOM(state),
-        .start_col = SCROLLREGION_LEFT(state),
-        .end_col   = SCROLLREGION_RIGHT(state),
-      };
+      VTermRect rect;
+      rect.start_row = state->scrollregion_top;
+      rect.end_row   = SCROLLREGION_BOTTOM(state);
+      rect.start_col = SCROLLREGION_LEFT(state);
+      rect.end_col   = SCROLLREGION_RIGHT(state);
 
       scroll(state, rect, -1, 0);
     }
@@ -474,11 +487,11 @@ static int on_control(unsigned char control, void *user)
         state->pos.row--;
     break;
 
-  case 0x8e: /* SS2 - ECMA-48 8.3.141 */
+  case 0x8e: // SS2 - ECMA-48 8.3.141
     state->gsingle_set = 2;
     break;
 
-  case 0x8f: /* SS3 - ECMA-48 8.3.142 */
+  case 0x8f: // SS3 - ECMA-48 8.3.142
     state->gsingle_set = 3;
     break;
 
@@ -506,24 +519,31 @@ static int on_control(unsigned char control, void *user)
 
 static int settermprop_bool(VTermState *state, VTermProp prop, int v)
 {
-  VTermValue val = { .boolean = v };
+  VTermValue val;
+  val.boolean = v;
   return vterm_state_set_termprop(state, prop, &val);
 }
 
 static int settermprop_int(VTermState *state, VTermProp prop, int v)
 {
-  VTermValue val = { .number = v };
+  VTermValue val;
+  val.number = v;
   return vterm_state_set_termprop(state, prop, &val);
 }
 
 static int settermprop_string(VTermState *state, VTermProp prop, const char *str, size_t len)
 {
-  char strvalue[len+1];
+  char *strvalue;
+  int r;
+  VTermValue val;
+  strvalue = vterm_allocator_malloc(state->vt, (len+1) * sizeof(char));
   strncpy(strvalue, str, len);
   strvalue[len] = 0;
 
-  VTermValue val = { .string = strvalue };
-  return vterm_state_set_termprop(state, prop, &val);
+  val.string = strvalue;
+  r = vterm_state_set_termprop(state, prop, &val);
+  vterm_allocator_free(state->vt, strvalue);
+  return r;
 }
 
 static void savecursor(VTermState *state, int save)
@@ -555,20 +575,19 @@ static int on_escape(const char *bytes, size_t len, void *user)
 {
   VTermState *state = user;
 
-  /* Easier to decode this from the first byte, even though the final
-   * byte terminates it
-   */
+  // Easier to decode this from the first byte, even though the final
+  // byte terminates it
   switch(bytes[0]) {
   case ' ':
     if(len != 2)
       return 0;
 
     switch(bytes[1]) {
-      case 'F': /* S7C1T */
+      case 'F': // S7C1T
         state->vt->mode.ctrl8bit = 0;
         break;
 
-      case 'G': /* S8C1T */
+      case 'G': // S8C1T
         state->vt->mode.ctrl8bit = 1;
         break;
 
@@ -582,31 +601,31 @@ static int on_escape(const char *bytes, size_t len, void *user)
       return 0;
 
     switch(bytes[1]) {
-      case '3': /* DECDHL top */
+      case '3': // DECDHL top
         if(state->mode.leftrightmargin)
           break;
         set_lineinfo(state, state->pos.row, NO_FORCE, DWL_ON, DHL_TOP);
         break;
 
-      case '4': /* DECDHL bottom */
+      case '4': // DECDHL bottom
         if(state->mode.leftrightmargin)
           break;
         set_lineinfo(state, state->pos.row, NO_FORCE, DWL_ON, DHL_BOTTOM);
         break;
 
-      case '5': /* DECSWL */
+      case '5': // DECSWL
         if(state->mode.leftrightmargin)
           break;
         set_lineinfo(state, state->pos.row, NO_FORCE, DWL_OFF, DHL_OFF);
         break;
 
-      case '6': /* DECDWL */
+      case '6': // DECDWL
         if(state->mode.leftrightmargin)
           break;
         set_lineinfo(state, state->pos.row, NO_FORCE, DWL_ON, DHL_OFF);
         break;
 
-      case '8': /* DECALN */
+      case '8': // DECALN
       {
         VTermPos pos;
         uint32_t E[] = { 'E', 0 };
@@ -621,7 +640,7 @@ static int on_escape(const char *bytes, size_t len, void *user)
     }
     return 2;
 
-  case '(': case ')': case '*': case '+': /* SCS */
+  case '(': case ')': case '*': case '+': // SCS
     if(len != 2)
       return 0;
 
@@ -639,26 +658,26 @@ static int on_escape(const char *bytes, size_t len, void *user)
 
     return 2;
 
-  case '7': /* DECSC */
+  case '7': // DECSC
     savecursor(state, 1);
     return 1;
 
-  case '8': /* DECRC */
+  case '8': // DECRC
     savecursor(state, 0);
     return 1;
 
-  case '<': /* Ignored by VT100. Used in VT52 mode to switch up to VT100 */
+  case '<': // Ignored by VT100. Used in VT52 mode to switch up to VT100
     return 1;
 
-  case '=': /* DECKPAM */
+  case '=': // DECKPAM
     state->mode.keypad = 1;
     return 1;
 
-  case '>': /* DECKPNM */
+  case '>': // DECKPNM
     state->mode.keypad = 0;
     return 1;
 
-  case 'c': /* RIS - ECMA-48 8.3.105 */
+  case 'c': // RIS - ECMA-48 8.3.105
   {
     VTermPos oldpos = state->pos;
     vterm_state_reset(state, 1);
@@ -667,23 +686,23 @@ static int on_escape(const char *bytes, size_t len, void *user)
     return 1;
   }
 
-  case 'n': /* LS2 - ECMA-48 8.3.78 */
+  case 'n': // LS2 - ECMA-48 8.3.78
     state->gl_set = 2;
     return 1;
 
-  case 'o': /* LS3 - ECMA-48 8.3.80 */
+  case 'o': // LS3 - ECMA-48 8.3.80
     state->gl_set = 3;
     return 1;
 
-  case '~': /* LS1R - ECMA-48 8.3.77 */
+  case '~': // LS1R - ECMA-48 8.3.77
     state->gr_set = 1;
     return 1;
 
-  case '}': /* LS2R - ECMA-48 8.3.79 */
+  case '}': // LS2R - ECMA-48 8.3.79
     state->gr_set = 2;
     return 1;
 
-  case '|': /* LS3R - ECMA-48 8.3.81 */
+  case '|': // LS3R - ECMA-48 8.3.81
     state->gr_set = 3;
     return 1;
 
@@ -695,16 +714,16 @@ static int on_escape(const char *bytes, size_t len, void *user)
 static void set_mode(VTermState *state, int num, int val)
 {
   switch(num) {
-  case 4: /* IRM - ECMA-48 7.2.10 */
+  case 4: // IRM - ECMA-48 7.2.10
     state->mode.insert = val;
     break;
 
-  case 20: /* LNM - ANSI X3.4-1977 */
+  case 20: // LNM - ANSI X3.4-1977
     state->mode.newline = val;
     break;
 
   default:
-    DEBUG_LOG("libvterm: Unknown mode %d\n", num);
+    DEBUG_LOG1("libvterm: Unknown mode %d\n", num);
     return;
   }
 }
@@ -716,11 +735,11 @@ static void set_dec_mode(VTermState *state, int num, int val)
     state->mode.cursor = val;
     break;
 
-  case 5: /* DECSCNM - screen mode */
+  case 5: // DECSCNM - screen mode
     settermprop_bool(state, VTERM_PROP_REVERSE, val);
     break;
 
-  case 6: /* DECOM - origin mode */
+  case 6: // DECOM - origin mode
     {
       VTermPos oldpos = state->pos;
       state->mode.origin = val;
@@ -742,12 +761,14 @@ static void set_dec_mode(VTermState *state, int num, int val)
     settermprop_bool(state, VTERM_PROP_CURSORVISIBLE, val);
     break;
 
-  case 69: /* DECVSSM - vertical split screen mode */
-           /* DECLRMM - left/right margin mode */
+  case 69: // DECVSSM - vertical split screen mode
+           // DECLRMM - left/right margin mode
     state->mode.leftrightmargin = val;
     if(val) {
-      /* Setting DECVSSM must clear doublewidth/doubleheight state of every line */
-      for(int row = 0; row < state->rows; row++)
+      int row;
+
+      // Setting DECVSSM must clear doublewidth/doubleheight state of every line
+      for(row = 0; row < state->rows; row++)
         set_lineinfo(state, row, FORCE, DWL_OFF, DHL_OFF);
     }
 
@@ -797,7 +818,7 @@ static void set_dec_mode(VTermState *state, int num, int val)
     break;
 
   default:
-    DEBUG_LOG("libvterm: Unknown DEC mode %d\n", num);
+    DEBUG_LOG1("libvterm: Unknown DEC mode %d\n", num);
     return;
   }
 }
@@ -884,9 +905,17 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
   VTermState *state = user;
   int leader_byte = 0;
   int intermed_byte = 0;
+  VTermPos oldpos = state->pos;
+  int handled = 1;
+
+  // Some temporaries for later code
+  int count, val;
+  int row, col;
+  VTermRect rect;
+  int selective;
 
   if(leader && leader[0]) {
-    if(leader[1]) /* longer than 1 char */
+    if(leader[1]) // longer than 1 char
       return 0;
 
     switch(leader[0]) {
@@ -900,7 +929,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
   }
 
   if(intermed && intermed[0]) {
-    if(intermed[1]) /* longer than 1 char */
+    if(intermed[1]) // longer than 1 char
       return 0;
 
     switch(intermed[0]) {
@@ -915,13 +944,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
     }
   }
 
-  VTermPos oldpos = state->pos;
-
-  /* Some temporaries for later code */
-  int count, val;
-  int row, col;
-  VTermRect rect;
-  int selective;
+  oldpos = state->pos;
 
 #define LBOUND(v,min) if((v) < (min)) (v) = (min)
 #define UBOUND(v,max) if((v) > (max)) (v) = (max)
@@ -930,7 +953,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 #define INTERMED(i,b) ((i << 16) | b)
 
   switch(intermed_byte << 16 | leader_byte << 8 | command) {
-  case 0x40: /* ICH - ECMA-48 8.3.64 */
+  case 0x40: // ICH - ECMA-48 8.3.64
     count = CSI_ARG_COUNT(args[0]);
 
     if(!is_cursor_in_scrollregion(state))
@@ -948,54 +971,54 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
     break;
 
-  case 0x41: /* CUU - ECMA-48 8.3.22 */
+  case 0x41: // CUU - ECMA-48 8.3.22
     count = CSI_ARG_COUNT(args[0]);
     state->pos.row -= count;
     state->at_phantom = 0;
     break;
 
-  case 0x42: /* CUD - ECMA-48 8.3.19 */
+  case 0x42: // CUD - ECMA-48 8.3.19
     count = CSI_ARG_COUNT(args[0]);
     state->pos.row += count;
     state->at_phantom = 0;
     break;
 
-  case 0x43: /* CUF - ECMA-48 8.3.20 */
+  case 0x43: // CUF - ECMA-48 8.3.20
     count = CSI_ARG_COUNT(args[0]);
     state->pos.col += count;
     state->at_phantom = 0;
     break;
 
-  case 0x44: /* CUB - ECMA-48 8.3.18 */
+  case 0x44: // CUB - ECMA-48 8.3.18
     count = CSI_ARG_COUNT(args[0]);
     state->pos.col -= count;
     state->at_phantom = 0;
     break;
 
-  case 0x45: /* CNL - ECMA-48 8.3.12 */
+  case 0x45: // CNL - ECMA-48 8.3.12
     count = CSI_ARG_COUNT(args[0]);
     state->pos.col = 0;
     state->pos.row += count;
     state->at_phantom = 0;
     break;
 
-  case 0x46: /* CPL - ECMA-48 8.3.13 */
+  case 0x46: // CPL - ECMA-48 8.3.13
     count = CSI_ARG_COUNT(args[0]);
     state->pos.col = 0;
     state->pos.row -= count;
     state->at_phantom = 0;
     break;
 
-  case 0x47: /* CHA - ECMA-48 8.3.9 */
+  case 0x47: // CHA - ECMA-48 8.3.9
     val = CSI_ARG_OR(args[0], 1);
     state->pos.col = val-1;
     state->at_phantom = 0;
     break;
 
-  case 0x48: /* CUP - ECMA-48 8.3.21 */
+  case 0x48: // CUP - ECMA-48 8.3.21
     row = CSI_ARG_OR(args[0], 1);
     col = argcount < 2 || CSI_ARG_IS_MISSING(args[1]) ? 1 : CSI_ARG(args[1]);
-    /* zero-based */
+    // zero-based
     state->pos.row = row-1;
     state->pos.col = col-1;
     if(state->mode.origin) {
@@ -1005,13 +1028,13 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
     state->at_phantom = 0;
     break;
 
-  case 0x49: /* CHT - ECMA-48 8.3.10 */
+  case 0x49: // CHT - ECMA-48 8.3.10
     count = CSI_ARG_COUNT(args[0]);
     tab(state, count, +1);
     break;
 
-  case 0x4a: /* ED - ECMA-48 8.3.39 */
-  case LEADER('?', 0x4a): /* DECSED - Selective Erase in Display */
+  case 0x4a: // ED - ECMA-48 8.3.39
+  case LEADER('?', 0x4a): // DECSED - Selective Erase in Display
     selective = (leader_byte == '?');
     switch(CSI_ARG(args[0])) {
     case CSI_ARG_MISSING:
@@ -1023,8 +1046,8 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
       rect.start_row = state->pos.row + 1; rect.end_row = state->rows;
       rect.start_col = 0;
-      for(int row = rect.start_row; row < rect.end_row; row++)
-        set_lineinfo(state, row, FORCE, DWL_OFF, DHL_OFF);
+      for(row = rect.start_row; row < rect.end_row; row++)
+	set_lineinfo(state, row, FORCE, DWL_OFF, DHL_OFF);
       if(rect.end_row > rect.start_row)
         erase(state, rect, selective);
       break;
@@ -1032,8 +1055,8 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
     case 1:
       rect.start_row = 0; rect.end_row = state->pos.row;
       rect.start_col = 0; rect.end_col = state->cols;
-      for(int row = rect.start_row; row < rect.end_row; row++)
-        set_lineinfo(state, row, FORCE, DWL_OFF, DHL_OFF);
+      for(row = rect.start_row; row < rect.end_row; row++)
+	set_lineinfo(state, row, FORCE, DWL_OFF, DHL_OFF);
       if(rect.end_col > rect.start_col)
         erase(state, rect, selective);
 
@@ -1046,15 +1069,15 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
     case 2:
       rect.start_row = 0; rect.end_row = state->rows;
       rect.start_col = 0; rect.end_col = state->cols;
-      for(int row = rect.start_row; row < rect.end_row; row++)
-        set_lineinfo(state, row, FORCE, DWL_OFF, DHL_OFF);
+      for(row = rect.start_row; row < rect.end_row; row++)
+	set_lineinfo(state, row, FORCE, DWL_OFF, DHL_OFF);
       erase(state, rect, selective);
       break;
     }
     break;
 
-  case 0x4b: /* EL - ECMA-48 8.3.41 */
-  case LEADER('?', 0x4b): /* DECSEL - Selective Erase in Line */
+  case 0x4b: // EL - ECMA-48 8.3.41
+  case LEADER('?', 0x4b): // DECSEL - Selective Erase in Line
     selective = (leader_byte == '?');
     rect.start_row = state->pos.row;
     rect.end_row   = state->pos.row + 1;
@@ -1076,7 +1099,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
     break;
 
-  case 0x4c: /* IL - ECMA-48 8.3.67 */
+  case 0x4c: // IL - ECMA-48 8.3.67
     count = CSI_ARG_COUNT(args[0]);
 
     if(!is_cursor_in_scrollregion(state))
@@ -1091,7 +1114,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
     break;
 
-  case 0x4d: /* DL - ECMA-48 8.3.32 */
+  case 0x4d: // DL - ECMA-48 8.3.32
     count = CSI_ARG_COUNT(args[0]);
 
     if(!is_cursor_in_scrollregion(state))
@@ -1106,7 +1129,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
     break;
 
-  case 0x50: /* DCH - ECMA-48 8.3.26 */
+  case 0x50: // DCH - ECMA-48 8.3.26
     count = CSI_ARG_COUNT(args[0]);
 
     if(!is_cursor_in_scrollregion(state))
@@ -1124,7 +1147,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
     break;
 
-  case 0x53: /* SU - ECMA-48 8.3.147 */
+  case 0x53: // SU - ECMA-48 8.3.147
     count = CSI_ARG_COUNT(args[0]);
 
     rect.start_row = state->scrollregion_top;
@@ -1136,7 +1159,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
     break;
 
-  case 0x54: /* SD - ECMA-48 8.3.113 */
+  case 0x54: // SD - ECMA-48 8.3.113
     count = CSI_ARG_COUNT(args[0]);
 
     rect.start_row = state->scrollregion_top;
@@ -1148,7 +1171,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
     break;
 
-  case 0x58: /* ECH - ECMA-48 8.3.38 */
+  case 0x58: // ECH - ECMA-48 8.3.38
     count = CSI_ARG_COUNT(args[0]);
 
     rect.start_row = state->pos.row;
@@ -1160,35 +1183,36 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
     erase(state, rect, 0);
     break;
 
-  case 0x5a: /* CBT - ECMA-48 8.3.7 */
+  case 0x5a: // CBT - ECMA-48 8.3.7
     count = CSI_ARG_COUNT(args[0]);
     tab(state, count, -1);
     break;
 
-  case 0x60: /* HPA - ECMA-48 8.3.57 */
+  case 0x60: // HPA - ECMA-48 8.3.57
     col = CSI_ARG_OR(args[0], 1);
     state->pos.col = col-1;
     state->at_phantom = 0;
     break;
 
-  case 0x61: /* HPR - ECMA-48 8.3.59 */
+  case 0x61: // HPR - ECMA-48 8.3.59
     count = CSI_ARG_COUNT(args[0]);
     state->pos.col += count;
     state->at_phantom = 0;
     break;
 
-  case 0x63: /* DA - ECMA-48 8.3.24 */
+  case 0x63: // DA - ECMA-48 8.3.24
     val = CSI_ARG_OR(args[0], 0);
     if(val == 0)
-      /* DEC VT100 response */
+      // DEC VT100 response
       vterm_push_output_sprintf_ctrl(state->vt, C1_CSI, "?1;2c");
     break;
 
-  case LEADER('>', 0x63): /* DEC secondary Device Attributes */
+  case LEADER('>', 0x63): // DEC secondary Device Attributes
+    // This returns xterm version number 100.
     vterm_push_output_sprintf_ctrl(state->vt, C1_CSI, ">%d;%d;%dc", 0, 100, 0);
     break;
 
-  case 0x64: /* VPA - ECMA-48 8.3.158 */
+  case 0x64: // VPA - ECMA-48 8.3.158
     row = CSI_ARG_OR(args[0], 1);
     state->pos.row = row-1;
     if(state->mode.origin)
@@ -1196,16 +1220,16 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
     state->at_phantom = 0;
     break;
 
-  case 0x65: /* VPR - ECMA-48 8.3.160 */
+  case 0x65: // VPR - ECMA-48 8.3.160
     count = CSI_ARG_COUNT(args[0]);
     state->pos.row += count;
     state->at_phantom = 0;
     break;
 
-  case 0x66: /* HVP - ECMA-48 8.3.63 */
+  case 0x66: // HVP - ECMA-48 8.3.63
     row = CSI_ARG_OR(args[0], 1);
     col = argcount < 2 || CSI_ARG_IS_MISSING(args[1]) ? 1 : CSI_ARG(args[1]);
-    /* zero-based */
+    // zero-based
     state->pos.row = row-1;
     state->pos.col = col-1;
     if(state->mode.origin) {
@@ -1215,7 +1239,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
     state->at_phantom = 0;
     break;
 
-  case 0x67: /* TBC - ECMA-48 8.3.154 */
+  case 0x67: // TBC - ECMA-48 8.3.154
     val = CSI_ARG_OR(args[0], 0);
 
     switch(val) {
@@ -1231,50 +1255,50 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
     case 2:
     case 4:
       break;
-    /* TODO: 1, 2 and 4 aren't meaningful yet without line tab stops */
+    // TODO: 1, 2 and 4 aren't meaningful yet without line tab stops
     default:
       return 0;
     }
     break;
 
-  case 0x68: /* SM - ECMA-48 8.3.125 */
+  case 0x68: // SM - ECMA-48 8.3.125
     if(!CSI_ARG_IS_MISSING(args[0]))
       set_mode(state, CSI_ARG(args[0]), 1);
     break;
 
-  case LEADER('?', 0x68): /* DEC private mode set */
+  case LEADER('?', 0x68): // DEC private mode set
     if(!CSI_ARG_IS_MISSING(args[0]))
       set_dec_mode(state, CSI_ARG(args[0]), 1);
     break;
 
-  case 0x6a: /* HPB - ECMA-48 8.3.58 */
+  case 0x6a: // HPB - ECMA-48 8.3.58
     count = CSI_ARG_COUNT(args[0]);
     state->pos.col -= count;
     state->at_phantom = 0;
     break;
 
-  case 0x6b: /* VPB - ECMA-48 8.3.159 */
+  case 0x6b: // VPB - ECMA-48 8.3.159
     count = CSI_ARG_COUNT(args[0]);
     state->pos.row -= count;
     state->at_phantom = 0;
     break;
 
-  case 0x6c: /* RM - ECMA-48 8.3.106 */
+  case 0x6c: // RM - ECMA-48 8.3.106
     if(!CSI_ARG_IS_MISSING(args[0]))
       set_mode(state, CSI_ARG(args[0]), 0);
     break;
 
-  case LEADER('?', 0x6c): /* DEC private mode reset */
+  case LEADER('?', 0x6c): // DEC private mode reset
     if(!CSI_ARG_IS_MISSING(args[0]))
       set_dec_mode(state, CSI_ARG(args[0]), 0);
     break;
 
-  case 0x6d: /* SGR - ECMA-48 8.3.117 */
+  case 0x6d: // SGR - ECMA-48 8.3.117
     vterm_state_setpen(state, args, argcount);
     break;
 
-  case 0x6e: /* DSR - ECMA-48 8.3.35 */
-  case LEADER('?', 0x6e): /* DECDSR */
+  case 0x6e: // DSR - ECMA-48 8.3.35
+  case LEADER('?', 0x6e): // DECDSR
     val = CSI_ARG_OR(args[0], 0);
 
     {
@@ -1282,12 +1306,12 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
       switch(val) {
       case 0: case 1: case 2: case 3: case 4:
-        /* ignore - these are replies */
+        // ignore - these are replies
         break;
       case 5:
         vterm_push_output_sprintf_ctrl(state->vt, C1_CSI, "%s0n", qmark);
         break;
-      case 6: /* CPR - cursor position report */
+      case 6: // CPR - cursor position report
         vterm_push_output_sprintf_ctrl(state->vt, C1_CSI, "%s%d;%dR", qmark, state->pos.row + 1, state->pos.col + 1);
         break;
       }
@@ -1295,7 +1319,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
     break;
 
 
-  case LEADER('!', 0x70): /* DECSTR - DEC soft terminal reset */
+  case LEADER('!', 0x70): // DECSTR - DEC soft terminal reset
     vterm_state_reset(state, 0);
     break;
 
@@ -1303,7 +1327,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
     request_dec_mode(state, CSI_ARG(args[0]));
     break;
 
-  case INTERMED(' ', 0x71): /* DECSCUSR - DEC set cursor shape */
+  case INTERMED(' ', 0x71): // DECSCUSR - DEC set cursor shape
     val = CSI_ARG_OR(args[0], 1);
 
     switch(val) {
@@ -1335,7 +1359,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
     break;
 
-  case INTERMED('"', 0x71): /* DECSCA - DEC select character protection attribute */
+  case INTERMED('"', 0x71): // DECSCA - DEC select character protection attribute
     val = CSI_ARG_OR(args[0], 0);
 
     switch(val) {
@@ -1349,7 +1373,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
     break;
 
-  case 0x72: /* DECSTBM - DEC custom */
+  case 0x72: // DECSTBM - DEC custom
     state->scrollregion_top = CSI_ARG_OR(args[0], 1) - 1;
     state->scrollregion_bottom = argcount < 2 || CSI_ARG_IS_MISSING(args[1]) ? -1 : CSI_ARG(args[1]);
     LBOUND(state->scrollregion_top, 0);
@@ -1361,15 +1385,15 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
       UBOUND(state->scrollregion_bottom, state->rows);
 
     if(SCROLLREGION_BOTTOM(state) <= state->scrollregion_top) {
-      /* Invalid */
+      // Invalid
       state->scrollregion_top    = 0;
       state->scrollregion_bottom = -1;
     }
 
     break;
 
-  case 0x73: /* DECSLRM - DEC custom */
-    /* Always allow setting these margins, just they won't take effect without DECVSSM */
+  case 0x73: // DECSLRM - DEC custom
+    // Always allow setting these margins, just they won't take effect without DECVSSM
     state->scrollregion_left = CSI_ARG_OR(args[0], 1) - 1;
     state->scrollregion_right = argcount < 2 || CSI_ARG_IS_MISSING(args[1]) ? -1 : CSI_ARG(args[1]);
     LBOUND(state->scrollregion_left, 0);
@@ -1382,14 +1406,26 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
     if(state->scrollregion_right > -1 &&
        state->scrollregion_right <= state->scrollregion_left) {
-      /* Invalid */
+      // Invalid
       state->scrollregion_left  = 0;
       state->scrollregion_right = -1;
     }
 
     break;
 
-  case INTERMED('\'', 0x7D): /* DECIC */
+  case 0x74:
+    switch(CSI_ARG(args[0])) {
+      case 8: // CSI 8 ; rows ; cols t  set size
+	if (argcount == 3)
+	  on_resize(CSI_ARG(args[1]), CSI_ARG(args[2]), state);
+	break;
+      default:
+	handled = 0;
+	break;
+    }
+    break;
+
+  case INTERMED('\'', 0x7D): // DECIC
     count = CSI_ARG_COUNT(args[0]);
 
     if(!is_cursor_in_scrollregion(state))
@@ -1404,7 +1440,7 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
     break;
 
-  case INTERMED('\'', 0x7E): /* DECDC */
+  case INTERMED('\'', 0x7E): // DECDC
     count = CSI_ARG_COUNT(args[0]);
 
     if(!is_cursor_in_scrollregion(state))
@@ -1420,6 +1456,11 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
     break;
 
   default:
+    handled = 0;
+    break;
+  }
+
+  if (!handled) {
     if(state->fallbacks && state->fallbacks->csi)
       if((*state->fallbacks->csi)(leader, args, argcount, intermed, command, state->fbdata))
         return 1;
@@ -1486,6 +1527,26 @@ static int on_osc(const char *command, size_t cmdlen, void *user)
     settermprop_string(state, VTERM_PROP_TITLE, command + 2, cmdlen - 2);
     return 1;
   }
+  else if(strneq(command, "10;", 3)) {
+    // request foreground color: <Esc>]10;?<0x07>
+    int red = state->default_fg.red;
+    int blue = state->default_fg.blue;
+    int green = state->default_fg.green;
+    vterm_push_output_sprintf_ctrl(state->vt, C1_OSC, "10;rgb:%02x%02x/%02x%02x/%02x%02x\x07", red, red, green, green, blue, blue);
+    return 1;
+  }
+  else if(strneq(command, "11;", 3)) {
+    // request background color: <Esc>]11;?<0x07>
+    int red = state->default_bg.red;
+    int blue = state->default_bg.blue;
+    int green = state->default_bg.green;
+    vterm_push_output_sprintf_ctrl(state->vt, C1_OSC, "11;rgb:%02x%02x/%02x%02x/%02x%02x\x07", red, red, green, green, blue, blue);
+    return 1;
+  }
+  else if(strneq(command, "12;", 3)) {
+    settermprop_string(state, VTERM_PROP_CURSORCOLOR, command + 3, cmdlen - 3);
+    return 1;
+  }
   else if(state->fallbacks && state->fallbacks->osc)
     if((*state->fallbacks->osc)(command, cmdlen, state->fbdata))
       return 1;
@@ -1497,12 +1558,13 @@ static void request_status_string(VTermState *state, const char *command, size_t
 {
   if(cmdlen == 1)
     switch(command[0]) {
-      case 'm': /* Query SGR */
+      case 'm': // Query SGR
         {
           long args[20];
           int argc = vterm_state_getpen(state, args, sizeof(args)/sizeof(args[0]));
+	  int argi;
           vterm_push_output_sprintf_ctrl(state->vt, C1_DCS, "1$r");
-          for(int argi = 0; argi < argc; argi++)
+          for(argi = 0; argi < argc; argi++)
             vterm_push_output_sprintf(state->vt,
                 argi == argc - 1             ? "%d" :
                 CSI_ARG_HAS_MORE(args[argi]) ? "%d:" :
@@ -1512,10 +1574,10 @@ static void request_status_string(VTermState *state, const char *command, size_t
           vterm_push_output_sprintf_ctrl(state->vt, C1_ST, "");
         }
         return;
-      case 'r': /* Query DECSTBM */
+      case 'r': // Query DECSTBM
         vterm_push_output_sprintf_dcs(state->vt, "1$r%d;%dr", state->scrollregion_top+1, SCROLLREGION_BOTTOM(state));
         return;
-      case 's': /* Query DECSLRM */
+      case 's': // Query DECSLRM
         vterm_push_output_sprintf_dcs(state->vt, "1$r%d;%ds", SCROLLREGION_LEFT(state)+1, SCROLLREGION_RIGHT(state));
         return;
     }
@@ -1526,7 +1588,7 @@ static void request_status_string(VTermState *state, const char *command, size_t
       switch(state->mode.cursor_shape) {
         case VTERM_PROP_CURSORSHAPE_BLOCK:     reply = 2; break;
         case VTERM_PROP_CURSORSHAPE_UNDERLINE: reply = 4; break;
-        case VTERM_PROP_CURSORSHAPE_BAR_LEFT:  reply = 6; break;
+	default: /* VTERM_PROP_CURSORSHAPE_BAR_LEFT */ reply = 6; break;
       }
       if(state->mode.cursor_blink)
         reply--;
@@ -1561,12 +1623,15 @@ static int on_resize(int rows, int cols, void *user)
 {
   VTermState *state = user;
   VTermPos oldpos = state->pos;
+  VTermPos delta = { 0, 0 };
 
   if(cols != state->cols) {
-    unsigned char *newtabstops = vterm_allocator_malloc(state->vt, (cols + 7) / 8);
-
-    /* TODO: This can all be done much more efficiently bytewise */
     int col;
+    unsigned char *newtabstops = vterm_allocator_malloc(state->vt, (cols + 7) / 8);
+    if (newtabstops == NULL)
+      return 0;
+
+    // TODO: This can all be done much more efficiently bytewise
     for(col = 0; col < state->cols && col < cols; col++) {
       unsigned char mask = 1 << (col & 7);
       if(state->tabstops[col >> 3] & mask)
@@ -1588,17 +1653,18 @@ static int on_resize(int rows, int cols, void *user)
   }
 
   if(rows != state->rows) {
-    VTermLineInfo *newlineinfo = vterm_allocator_malloc(state->vt, rows * sizeof(VTermLineInfo));
-
     int row;
+    VTermLineInfo *newlineinfo = vterm_allocator_malloc(state->vt, rows * sizeof(VTermLineInfo));
+    if (newlineinfo == NULL)
+      return 0;
+
     for(row = 0; row < state->rows && row < rows; row++) {
       newlineinfo[row] = state->lineinfo[row];
     }
 
     for( ; row < rows; row++) {
-      newlineinfo[row] = (VTermLineInfo){
-        .doublewidth = 0,
-      };
+      newlineinfo[row].doublewidth = 0;
+      newlineinfo[row].doubleheight = 0;
     }
 
     vterm_allocator_free(state->vt, state->lineinfo);
@@ -1612,8 +1678,6 @@ static int on_resize(int rows, int cols, void *user)
     UBOUND(state->scrollregion_bottom, state->rows);
   if(state->scrollregion_right > -1)
     UBOUND(state->scrollregion_right, state->cols);
-
-  VTermPos delta = { 0, 0 };
 
   if(state->callbacks && state->callbacks->resize)
     (*state->callbacks->resize)(rows, cols, &delta, state->cbdata);
@@ -1637,21 +1701,28 @@ static int on_resize(int rows, int cols, void *user)
 }
 
 static const VTermParserCallbacks parser_callbacks = {
-  .text    = on_text,
-  .control = on_control,
-  .escape  = on_escape,
-  .csi     = on_csi,
-  .osc     = on_osc,
-  .dcs     = on_dcs,
-  .resize  = on_resize,
+  on_text, // text
+  on_control, // control
+  on_escape, // escape
+  on_csi, // csi
+  on_osc, // osc
+  on_dcs, // dcs
+  on_resize // resize
 };
 
+/*
+ * Return the existing state or create a new one.
+ * Returns NULL when out of memory.
+ */
 VTermState *vterm_obtain_state(VTerm *vt)
 {
+  VTermState *state;
   if(vt->state)
     return vt->state;
 
-  VTermState *state = vterm_state_new(vt);
+  state = vterm_state_new(vt);
+  if (state == NULL)
+    return NULL;
   vt->state = state;
 
   state->combine_chars_size = 16;
@@ -1662,7 +1733,7 @@ VTermState *vterm_obtain_state(VTerm *vt)
   state->lineinfo = vterm_allocator_malloc(state->vt, state->rows * sizeof(VTermLineInfo));
 
   state->encoding_utf8.enc = vterm_lookup_encoding(ENC_UTF8, 'u');
-  if(*state->encoding_utf8.enc->init)
+  if(*state->encoding_utf8.enc->init != NULL)
     (*state->encoding_utf8.enc->init)(state->encoding_utf8.enc, state->encoding_utf8.data);
 
   vterm_parser_set_callbacks(vt, &parser_callbacks, state);
@@ -1672,6 +1743,8 @@ VTermState *vterm_obtain_state(VTerm *vt)
 
 void vterm_state_reset(VTermState *state, int hard)
 {
+  VTermEncoding *default_enc;
+
   state->scrollregion_top = 0;
   state->scrollregion_bottom = -1;
   state->scrollregion_left = 0;
@@ -1690,28 +1763,37 @@ void vterm_state_reset(VTermState *state, int hard)
 
   state->vt->mode.ctrl8bit   = 0;
 
-  for(int col = 0; col < state->cols; col++)
-    if(col % 8 == 0)
-      set_col_tabstop(state, col);
-    else
-      clear_col_tabstop(state, col);
+  {
+    int col;
+    for(col = 0; col < state->cols; col++)
+      if(col % 8 == 0)
+	set_col_tabstop(state, col);
+      else
+	clear_col_tabstop(state, col);
+  }
 
-  for(int row = 0; row < state->rows; row++)
-    set_lineinfo(state, row, FORCE, DWL_OFF, DHL_OFF);
+  {
+    int row;
+    for(row = 0; row < state->rows; row++)
+      set_lineinfo(state, row, FORCE, DWL_OFF, DHL_OFF);
+  }
 
   if(state->callbacks && state->callbacks->initpen)
     (*state->callbacks->initpen)(state->cbdata);
 
   vterm_state_resetpen(state);
 
-  VTermEncoding *default_enc = state->vt->mode.utf8 ?
+  default_enc = state->vt->mode.utf8 ?
       vterm_lookup_encoding(ENC_UTF8,      'u') :
       vterm_lookup_encoding(ENC_SINGLE_94, 'B');
 
-  for(int i = 0; i < 4; i++) {
-    state->encoding[i].enc = default_enc;
-    if(default_enc->init)
-      (*default_enc->init)(default_enc, state->encoding[i].data);
+  {
+    int i;
+    for(i = 0; i < 4; i++) {
+      state->encoding[i].enc = default_enc;
+      if(default_enc->init)
+	(*default_enc->init)(default_enc, state->encoding[i].data);
+    }
   }
 
   state->gl_set = 0;
@@ -1720,17 +1802,20 @@ void vterm_state_reset(VTermState *state, int hard)
 
   state->protected_cell = 0;
 
-  /* Initialise the props */
+  // Initialise the props
   settermprop_bool(state, VTERM_PROP_CURSORVISIBLE, 1);
   settermprop_bool(state, VTERM_PROP_CURSORBLINK,   1);
   settermprop_int (state, VTERM_PROP_CURSORSHAPE,   VTERM_PROP_CURSORSHAPE_BLOCK);
 
   if(hard) {
+    VTermRect rect = { 0, 0, 0, 0 };
+
     state->pos.row = 0;
     state->pos.col = 0;
     state->at_phantom = 0;
 
-    VTermRect rect = { 0, state->rows, 0, state->cols };
+    rect.end_row = state->rows;
+    rect.end_col =  state->cols;
     erase(state, rect, 0);
   }
 }
@@ -1738,6 +1823,14 @@ void vterm_state_reset(VTermState *state, int hard)
 void vterm_state_get_cursorpos(const VTermState *state, VTermPos *cursorpos)
 {
   *cursorpos = state->pos;
+}
+
+void vterm_state_get_mousestate(const VTermState *state, VTermMouseState *mousestate)
+{
+  mousestate->pos.col = state->mouse_col;
+  mousestate->pos.row = state->mouse_row;
+  mousestate->buttons = state->mouse_buttons;
+  mousestate->flags = state->mouse_flags;
 }
 
 void vterm_state_set_callbacks(VTermState *state, const VTermStateCallbacks *callbacks, void *user)
@@ -1779,8 +1872,8 @@ void *vterm_state_get_unrecognised_fbdata(VTermState *state)
 
 int vterm_state_set_termprop(VTermState *state, VTermProp prop, VTermValue *val)
 {
-  /* Only store the new value of the property if usercode said it was happy.
-   * This is especially important for altscreen switching */
+  // Only store the new value of the property if usercode said it was happy.
+  // This is especially important for altscreen switching
   if(state->callbacks && state->callbacks->settermprop)
     if(!(*state->callbacks->settermprop)(prop, val, state->cbdata))
       return 0;
@@ -1788,7 +1881,8 @@ int vterm_state_set_termprop(VTermState *state, VTermProp prop, VTermValue *val)
   switch(prop) {
   case VTERM_PROP_TITLE:
   case VTERM_PROP_ICONNAME:
-    /* we don't store these, just transparently pass through */
+  case VTERM_PROP_CURSORCOLOR:
+    // we don't store these, just transparently pass through
     return 1;
   case VTERM_PROP_CURSORVISIBLE:
     state->mode.cursor_visible = val->boolean;
@@ -1805,12 +1899,9 @@ int vterm_state_set_termprop(VTermState *state, VTermProp prop, VTermValue *val)
   case VTERM_PROP_ALTSCREEN:
     state->mode.alt_screen = val->boolean;
     if(state->mode.alt_screen) {
-      VTermRect rect = {
-        .start_row = 0,
-        .start_col = 0,
-        .end_row = state->rows,
-        .end_col = state->cols,
-      };
+      VTermRect rect = {0, 0, 0, 0};
+      rect.end_row = state->rows;
+      rect.end_col = state->cols;
       erase(state, rect, 0);
     }
     return 1;

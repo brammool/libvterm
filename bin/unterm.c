@@ -8,6 +8,7 @@
 
 #include "vterm.h"
 
+#define DEFINE_INLINES
 #include "../src/utf8.h" // fill_utf8
 
 #define streq(a,b) (!strcmp(a,b))
@@ -25,7 +26,9 @@ static enum {
 
 static int col2index(VTermColor target)
 {
-  for(int index = 0; index < 256; index++) {
+  int index;
+
+  for(index = 0; index < 256; index++) {
     VTermColor col;
     vterm_state_get_palette_color(NULL, index, &col);
     if(col.red == target.red && col.green == target.green && col.blue == target.blue)
@@ -118,20 +121,26 @@ static void dump_cell(const VTermScreenCell *cell, const VTermScreenCell *prevce
           break;
 
         printf("\x1b[");
-        for(int i = 0; i < sgri; i++)
-          printf(!i               ? "%d" :
-              CSI_ARG_HAS_MORE(sgr[i]) ? ":%d" :
-              ";%d",
-              CSI_ARG(sgr[i]));
+	{
+	  int i;
+	  for(i = 0; i < sgri; i++)
+	    printf(!i               ? "%d" :
+		CSI_ARG_HAS_MORE(sgr[i]) ? ":%d" :
+		";%d",
+		CSI_ARG(sgr[i]));
+	}
         printf("m");
       }
       break;
   }
 
-  for(int i = 0; i < VTERM_MAX_CHARS_PER_CELL && cell->chars[i]; i++) {
-    char bytes[6];
-    bytes[fill_utf8(cell->chars[i], bytes)] = 0;
-    printf("%s", bytes);
+  {
+    int i;
+    for(i = 0; i < VTERM_MAX_CHARS_PER_CELL && cell->chars[i]; i++) {
+      char bytes[6];
+      bytes[fill_utf8(cell->chars[i], bytes)] = 0;
+      printf("%s", bytes);
+    }
   }
 }
 
@@ -153,8 +162,11 @@ static void dump_eol(const VTermScreenCell *prevcell)
 
 void dump_row(int row)
 {
-  VTermPos pos = { .row = row, .col = 0 };
-  VTermScreenCell prevcell = { 0 };
+  VTermPos pos;
+  VTermScreenCell prevcell;
+  pos.row = row;
+  pos.col = 0;
+  memset(&prevcell, 0, sizeof(prevcell));
   vterm_state_get_default_colors(vterm_obtain_state(vt), &prevcell.fg, &prevcell.bg);
 
   while(pos.col < cols) {
@@ -172,10 +184,13 @@ void dump_row(int row)
 
 static int screen_sb_pushline(int cols, const VTermScreenCell *cells, void *user)
 {
-  VTermScreenCell prevcell = { 0 };
+  VTermScreenCell prevcell;
+  int col;
+
+  memset(&prevcell, 0, sizeof(prevcell));
   vterm_state_get_default_colors(vterm_obtain_state(vt), &prevcell.fg, &prevcell.bg);
 
-  for(int col = 0; col < cols; col++) {
+  for(col = 0; col < cols; col++) {
     dump_cell(cells + col, &prevcell);
     prevcell = cells[col];
   }
@@ -193,16 +208,28 @@ static int screen_resize(int new_rows, int new_cols, void *user)
 }
 
 static VTermScreenCallbacks cb_screen = {
-  .sb_pushline = &screen_sb_pushline,
-  .resize      = &screen_resize,
+  NULL, // damage
+  NULL, // moverect
+  NULL, // movecursor
+  NULL, // settermprop
+  NULL, // bell
+  &screen_resize, // resize
+  &screen_sb_pushline, // sb_pushline
+  NULL, // popline
 };
 
 int main(int argc, char *argv[])
 {
+  int opt;
+  const char *file;
+  int fd;
+  int len;
+  char buffer[1024];
+  int row;
+
   rows = 25;
   cols = 80;
 
-  int opt;
   while((opt = getopt(argc, argv, "f:l:c:")) != -1) {
     switch(opt) {
       case 'f':
@@ -230,28 +257,26 @@ int main(int argc, char *argv[])
     }
   }
 
-  const char *file = argv[optind++];
-  int fd = open(file, O_RDONLY);
+  file = argv[optind++];
+  fd = open(file, O_RDONLY);
   if(fd == -1) {
     fprintf(stderr, "Cannot open %s - %s\n", file, strerror(errno));
     exit(1);
   }
 
   vt = vterm_new(rows, cols);
-  vterm_set_utf8(vt, true);
+  vterm_set_utf8(vt, TRUE);
 
   vts = vterm_obtain_screen(vt);
   vterm_screen_set_callbacks(vts, &cb_screen, NULL);
 
   vterm_screen_reset(vts, 1);
 
-  int len;
-  char buffer[1024];
   while((len = read(fd, buffer, sizeof(buffer))) > 0) {
     vterm_input_write(vt, buffer, len);
   }
 
-  for(int row = 0; row < rows; row++) {
+  for(row = 0; row < rows; row++) {
     dump_row(row);
   }
 

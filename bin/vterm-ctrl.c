@@ -1,10 +1,11 @@
-#define _XOPEN_SOURCE 500  /* strdup */
+#define _XOPEN_SOURCE 500  // strdup
 
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #define streq(a,b) (strcmp(a,b)==0)
+#define TRUE 1
+#define FALSE 0
 
 #include <termios.h>
 
@@ -39,7 +40,8 @@ typedef enum {
 
 static BoolQuery getboolq(int *argip, int argc, char *argv[])
 {
-  return getchoice(argip, argc, argv, (const char *[]){"off", "on", "query", NULL});
+  const char *choices[] = {"off", "on", "query", NULL};
+  return getchoice(argip, argc, argv, choices);
 }
 
 static char *helptext[] = {
@@ -60,13 +62,14 @@ static char *helptext[] = {
   NULL
 };
 
-static bool seticanon(bool icanon, bool echo)
+static int seticanon(int icanon, int echo)
 {
   struct termios termios;
+  int ret;
 
   tcgetattr(0, &termios);
 
-  bool ret = (termios.c_lflag & ICANON);
+  ret = (termios.c_lflag & ICANON);
 
   if(icanon) termios.c_lflag |=  ICANON;
   else       termios.c_lflag &= ~ICANON;
@@ -83,30 +86,30 @@ static void await_c1(unsigned char c1)
 {
   unsigned char c;
 
-  /* await CSI - 8bit or 2byte 7bit form */
-  bool in_esc = false;
+  // await CSI - 8bit or 2byte 7bit form
+  int in_esc = FALSE;
   while((c = getchar())) {
     if(c == c1)
       break;
     if(in_esc && c == (char)(c1 - 0x40))
       break;
     if(!in_esc && c == 0x1b)
-      in_esc = true;
+      in_esc = TRUE;
     else
-      in_esc = false;
+      in_esc = FALSE;
   }
 }
 
 static char *read_csi()
 {
+  unsigned char csi[32];
+  int i = 0;
+
   await_c1(0x9B); // CSI
 
-  /* TODO: This really should be a more robust CSI parser
-   */
-  char csi[32];
-  int i = 0;
+  // TODO: This really should be a more robust CSI parser
   for(; i < sizeof(csi)-1; i++) {
-    char c = csi[i] = getchar();
+    int c = csi[i] = getchar();
     if(c >= 0x40 && c <= 0x7e)
       break;
   }
@@ -114,64 +117,68 @@ static char *read_csi()
 
   // TODO: returns longer than 32?
 
-  return strdup(csi);
+  return strdup((char *)csi);
 }
 
 static char *read_dcs()
 {
+  unsigned char dcs[32];
+  int in_esc = FALSE;
+  int i;
+
   await_c1(0x90);
 
-  char dcs[32];
-  bool in_esc = false;
-  int i = 0;
-  for(; i < sizeof(dcs)-1; ) {
+  for(i = 0; i < sizeof(dcs)-1; ) {
     char c = getchar();
     if(c == 0x9c) // ST
       break;
     if(in_esc && c == 0x5c)
       break;
     if(!in_esc && c == 0x1b)
-      in_esc = true;
+      in_esc = TRUE;
     else {
       dcs[i++] = c;
-      in_esc = false;
+      in_esc = FALSE;
     }
   }
   dcs[++i] = 0;
 
-  return strdup(dcs);
+  return strdup((char *)dcs);
 }
 
 static void usage(int exitcode)
 {
+  char **p;
+
   fprintf(stderr, "Control a libvterm-based terminal\n"
       "\n"
       "Options:\n");
 
-  for(char **p = helptext; *p; p++)
+  for(p = helptext; *p; p++)
     fprintf(stderr, "  %s\n", *p);
 
   exit(exitcode);
 }
 
-static bool query_dec_mode(int mode)
+static int query_dec_mode(int mode)
 {
+  char *s = NULL;
+
   printf("\x1b[?%d$p", mode);
 
-  char *s = NULL;
   do {
+    int reply_mode, reply_value;
+    char reply_cmd;
+
     if(s)
       free(s);
     s = read_csi();
 
-    /* expect "?" mode ";" value "$y" */
+    // expect "?" mode ";" value "$y"
 
-    int reply_mode, reply_value;
-    char reply_cmd;
-    /* If the sscanf format string ends in a literal, we can't tell from
-     * its return value if it matches. Hence we'll %c the cmd and check it
-     * explicitly
-     */
+    // If the sscanf format string ends in a literal, we can't tell from
+    // its return value if it matches. Hence we'll %c the cmd and check it
+    // explicitly
     if(sscanf(s, "?%d;%d$%c", &reply_mode, &reply_value, &reply_cmd) < 3)
       continue;
     if(reply_cmd != 'y')
@@ -183,12 +190,12 @@ static bool query_dec_mode(int mode)
     free(s);
 
     if(reply_value == 1 || reply_value == 3)
-      return true;
+      return TRUE;
     if(reply_value == 2 || reply_value == 4)
-      return false;
+      return FALSE;
 
     printf("Unrecognised reply to DECRQM: %d\n", reply_value);
-    return false;
+    return FALSE;
   } while(1);
 }
 
@@ -211,10 +218,13 @@ static void do_dec_mode(int mode, BoolQuery val, const char *name)
 
 static int query_rqss_numeric(char *cmd)
 {
+  char *s = NULL;
+
   printf("\x1bP$q%s\x1b\\", cmd);
 
-  char *s = NULL;
   do {
+    int num;
+
     if(s)
       free(s);
     s = read_dcs();
@@ -231,7 +241,6 @@ static int query_rqss_numeric(char *cmd)
     if(s[0] != '1' || s[1] != '$' || s[2] != 'r')
       return -1;
 
-    int num;
     if(sscanf(s + 3, "%d", &num) != 1)
       return -1;
 
@@ -239,11 +248,11 @@ static int query_rqss_numeric(char *cmd)
   } while(1);
 }
 
-bool wasicanon;
+int wasicanon;
 
 void restoreicanon(void)
 {
-  seticanon(wasicanon, true);
+  seticanon(wasicanon, TRUE);
 }
 
 int main(int argc, char *argv[])
@@ -253,7 +262,7 @@ int main(int argc, char *argv[])
   if(argc == 1)
     usage(0);
 
-  wasicanon = seticanon(false, false);
+  wasicanon = seticanon(FALSE, FALSE);
   atexit(restoreicanon);
 
   while(argi < argc) {
@@ -263,7 +272,8 @@ int main(int argc, char *argv[])
       printf("\x1b" "c");
     }
     else if(streq(arg, "s8c1t")) {
-      switch(getchoice(&argi, argc, argv, (const char *[]){"off", "on", NULL})) {
+      const char *choices[] = {"off", "on", NULL};
+      switch(getchoice(&argi, argc, argv, choices)) {
       case 0:
         printf("\x1b F"); break;
       case 1:
@@ -271,7 +281,8 @@ int main(int argc, char *argv[])
       }
     }
     else if(streq(arg, "keypad")) {
-      switch(getchoice(&argi, argc, argv, (const char *[]){"app", "num", NULL})) {
+      const char *choices[] = {"app", "num", NULL};
+      switch(getchoice(&argi, argc, argv, choices)) {
       case 0:
         printf("\x1b="); break;
       case 1:
@@ -290,7 +301,8 @@ int main(int argc, char *argv[])
     else if(streq(arg, "curshape")) {
       // TODO: This ought to query the current value of DECSCUSR because it
       //   may need blinking on or off
-      int shape = getchoice(&argi, argc, argv, (const char *[]){"block", "under", "bar", "query", NULL});
+      const char *choices[] = {"block", "under", "bar", "query", NULL};
+      int shape = getchoice(&argi, argc, argv, choices);
       switch(shape) {
         case 3: // query
           shape = query_rqss_numeric(" q");
@@ -315,7 +327,8 @@ int main(int argc, char *argv[])
       }
     }
     else if(streq(arg, "mouse")) {
-      switch(getchoice(&argi, argc, argv, (const char *[]){"off", "click", "clickdrag", "motion", NULL})) {
+      const char *choices[] = {"off", "click", "clickdrag", "motion", NULL};
+      switch(getchoice(&argi, argc, argv, choices)) {
       case 0:
         printf("\x1b[?1000l"); break;
       case 1:
@@ -349,6 +362,5 @@ int main(int argc, char *argv[])
       exit(1);
     }
   }
-
   return 0;
 }
